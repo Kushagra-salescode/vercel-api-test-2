@@ -42,7 +42,7 @@ public class DeploymentEngineService {
 
     private final HttpClient httpClient = HttpClient.newHttpClient();
 
-    @Transactional
+    // @Transactional // Disable transaction for MVP as we don't use DB
     public DeploymentEntity triggerGitHubDeployment(ProjectEntity project, String commitHash, String branch) {
         DeploymentEntity deployment = new DeploymentEntity();
         deployment.id = idGenerator.newId();
@@ -54,17 +54,19 @@ public class DeploymentEngineService {
         deployment.status = DeploymentEntity.Status.QUEUED;
         deployment.createdAt = clock.nowUtc();
         deployment.updatedAt = deployment.createdAt;
-        deployment.persist();
+        // deployment.persist(); // Disable for MVP
 
         try {
             Map<String, Object> payload = new HashMap<>();
             payload.put("name", project.slug);
-            payload.put("gitSource", Map.of(
-                    "type", "github",
-                    "repo", project.githubOwner + "/" + project.githubRepo,
-                    "ref", branch,
-                    "sha", commitHash
-            ));
+            payload.put("gitSource", new HashMap<String, String>() {{
+                put("type", "github");
+                put("repo", project.githubOwner + "/" + project.githubRepo);
+                put("ref", branch);
+                if (commitHash != null) {
+                    put("sha", commitHash);
+                }
+            }});
             if (project.outputDirectory != null) {
                 payload.put("outputDirectory", project.outputDirectory);
             }
@@ -73,6 +75,8 @@ public class DeploymentEngineService {
             }
 
             String jsonBody = objectMapper.writeValueAsString(payload);
+            
+            System.out.println("Triggering Vercel deployment for " + project.slug);
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(vercelBaseUrl + "/v13/deployments?teamId=" + vercelTeamId))
@@ -82,25 +86,27 @@ public class DeploymentEngineService {
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            System.out.println("Vercel response: " + response.statusCode() + " " + response.body());
+            
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
                 JsonNode json = objectMapper.readTree(response.body());
                 deployment.vercelDeploymentId = json.get("id").asText();
                 deployment.url = json.get("url").asText();
                 deployment.status = DeploymentEntity.Status.RUNNING;
                 deployment.updatedAt = clock.nowUtc();
-                deployment.persist();
+                // deployment.persist();
             } else {
                 deployment.status = DeploymentEntity.Status.FAILED;
                 deployment.logs = "Failed to trigger Vercel deployment: " + response.statusCode() + " " + response.body();
                 deployment.updatedAt = clock.nowUtc();
-                deployment.persist();
+                // deployment.persist();
             }
         } catch (Exception e) {
             Log.error("Error triggering Vercel deployment", e);
             deployment.status = DeploymentEntity.Status.FAILED;
             deployment.logs = "Exception triggering Vercel deployment: " + e.getMessage();
             deployment.updatedAt = clock.nowUtc();
-            deployment.persist();
+            // deployment.persist();
         }
 
         return deployment;
@@ -111,7 +117,7 @@ public class DeploymentEngineService {
      * For a real implementation, you would upload files to Vercel using their file-based deployment API.
      * Here we record a deployment and mark it as RUNNING to be picked up by a worker/poller.
      */
-    @Transactional
+    // @Transactional
     public DeploymentEntity triggerZipDeployment(ProjectEntity project, String zipObjectKey) {
         DeploymentEntity deployment = new DeploymentEntity();
         deployment.id = idGenerator.newId();
@@ -122,11 +128,11 @@ public class DeploymentEngineService {
         deployment.status = DeploymentEntity.Status.QUEUED;
         deployment.createdAt = clock.nowUtc();
         deployment.updatedAt = deployment.createdAt;
-        deployment.persist();
+        // deployment.persist();
         return deployment;
     }
 
-    @Transactional
+    // @Transactional
     public void pollAndUpdateDeploymentStatus(DeploymentEntity deployment) {
         if (deployment.vercelDeploymentId == null) {
             return;
@@ -144,7 +150,7 @@ public class DeploymentEngineService {
                 deployment.status = mapVercelState(state);
                 deployment.url = json.has("url") ? json.get("url").asText() : deployment.url;
                 deployment.updatedAt = OffsetDateTime.now();
-                deployment.persist();
+                // deployment.persist();
             } else {
                 Log.warnf("Failed to poll Vercel deployment: %s %s", response.statusCode(), response.body());
             }

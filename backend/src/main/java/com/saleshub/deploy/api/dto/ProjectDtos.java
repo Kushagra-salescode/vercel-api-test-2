@@ -30,6 +30,8 @@ public class ProjectDtos {
         public String repoUrl;
         public String defaultBranch;
         public String defaultDomain;
+        public String vercelProjectId;
+        public String latestDeploymentId;
 
         public static ProjectResponse fromEntity(ProjectEntity entity) {
             ProjectResponse r = new ProjectResponse();
@@ -40,6 +42,7 @@ public class ProjectDtos {
             r.sourceType = entity.sourceType.name();
             r.repoUrl = entity.repoUrl;
             r.defaultBranch = entity.defaultBranch;
+            r.vercelProjectId = entity.vercelProjectId;
             return r;
         }
     }
