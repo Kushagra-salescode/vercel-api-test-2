@@ -1,0 +1,154 @@
+// Prisma schema representing the core deployment platform data model.
+// This is the contract for multi-tenant data used by the Quarkus service and any Node-based workers.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProjectSourceType {
+  GITHUB
+  ZIP
+  PLUGIN
+  MANUAL
+}
+
+enum DeploymentTriggerType {
+  GITHUB_PUSH
+  ZIP_UPLOAD
+  MANUAL_HOOK
+  PLUGIN_ACTIVATION
+}
+
+enum DeploymentStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum DomainType {
+  DEFAULT
+  CUSTOM
+}
+
+enum WebhookProvider {
+  GITHUB
+}
+
+model Organization {
+  id        String    @id @default(cuid()) @map("id")
+  name      String
+  slug      String    @unique
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  projects  Project[]
+
+  @@map("organizations")
+}
+
+model Project {
+  id                String             @id @default(cuid()) @map("id")
+  orgId             String             @map("org_id")
+  name              String
+  slug              String
+  sourceType        ProjectSourceType  @map("source_type")
+  repoUrl           String?            @map("repo_url")
+  githubOwner       String?            @map("github_owner")
+  githubRepo        String?            @map("github_repo")
+  defaultBranch     String?            @map("default_branch")
+  buildCommand      String?            @map("build_command")
+  outputDirectory   String?            @map("output_directory")
+  vercelProjectId   String?            @map("vercel_project_id")
+  vercelTeamId      String?            @map("vercel_team_id")
+  pluginName        String?            @map("plugin_name")
+  pluginUserId      String?            @map("plugin_user_id")
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+
+  organization      Organization       @relation(fields: [orgId], references: [id])
+  deployments       Deployment[]
+  domains           Domain[]
+  webhooks          Webhook[]
+  deployHooks       DeployHook[]
+
+  @@index([orgId])
+  @@unique([orgId, slug])
+  @@map("projects")
+}
+
+model Deployment {
+  id                 String               @id @default(cuid()) @map("id")
+  projectId          String               @map("project_id")
+  sourceType         ProjectSourceType    @map("source_type")
+  triggerType        DeploymentTriggerType @map("trigger_type")
+  commitHash         String?              @map("commit_hash")
+  branch             String?              @map("branch")
+  zipObjectKey       String?              @map("zip_object_key")
+  status             DeploymentStatus     @map("status")
+  vercelDeploymentId String?              @map("vercel_deployment_id")
+  url                String?              @map("url")
+  logs               String?              @db.Text
+  createdAt          DateTime             @default(now()) @map("created_at")
+  updatedAt          DateTime             @updatedAt @map("updated_at")
+
+  project            Project              @relation(fields: [projectId], references: [id])
+
+  @@index([projectId])
+  @@map("deployments")
+}
+
+model Domain {
+  id             String     @id @default(cuid()) @map("id")
+  projectId      String     @map("project_id")
+  hostname       String
+  type           DomainType @map("type")
+  vercelDomainId String?    @map("vercel_domain_id")
+  verified       Boolean    @default(false)
+  primary        Boolean    @default(false)
+  createdAt      DateTime   @default(now()) @map("created_at")
+  updatedAt      DateTime   @updatedAt @map("updated_at")
+
+  project        Project    @relation(fields: [projectId], references: [id])
+
+  @@index([projectId])
+  @@unique([hostname])
+  @@map("domains")
+}
+
+model Webhook {
+  id            String          @id @default(cuid()) @map("id")
+  projectId     String          @map("project_id")
+  provider      WebhookProvider @map("provider")
+  externalId    String?         @map("external_id")
+  secret        String          @map("secret")
+  url           String          @map("url")
+  lastEventId   String?         @map("last_event_id")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+
+  project       Project         @relation(fields: [projectId], references: [id])
+
+  @@index([projectId])
+  @@map("webhooks")
+}
+
+model DeployHook {
+  id              String   @id @default(cuid()) @map("id")
+  projectId       String   @map("project_id")
+  hookId          String   @unique @map("hook_id")
+  description     String?  @map("description")
+  createdAt       DateTime @default(now()) @map("created_at")
+  lastTriggeredAt DateTime? @map("last_triggered_at")
+
+  project         Project  @relation(fields: [projectId], references: [id])
+
+  @@index([projectId])
+  @@map("deploy_hooks")
+}
+
