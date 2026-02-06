@@ -1,7 +1,6 @@
 /Users/kushagra/projects/vercel-api-test-2/backend/src/main/java/com/saleshub/deploy/Application.java
 /Users/kushagra/projects/vercel-api-test-2/backend/src/main/java/com/saleshub/deploy/api/DeployHookResource.java
 /Users/kushagra/projects/vercel-api-test-2/backend/src/main/java/com/saleshub/deploy/api/DeploymentResource.java
-/Users/kushagra/projects/vercel-api-test-2/backend/src/main/java/com/saleshub/deploy/api/DomainResource.java
 /Users/kushagra/projects/vercel-api-test-2/backend/src/main/java/com/saleshub/deploy/api/GitHubWebhookResource.java
 /Users/kushagra/projects/vercel-api-test-2/backend/src/main/java/com/saleshub/deploy/api/ProjectResource.java
 /Users/kushagra/projects/vercel-api-test-2/backend/src/main/java/com/saleshub/deploy/api/dto/DeploymentDtos.java

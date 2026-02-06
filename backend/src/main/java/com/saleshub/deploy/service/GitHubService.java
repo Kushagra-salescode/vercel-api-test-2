@@ -136,13 +136,42 @@ public class GitHubService {
                 project.githubRepo = parts[1];
                 project.defaultBranch = "main";
                 project.updatedAt = clock.nowUtc();
-                project.persist();
+                project.updatedAt = clock.nowUtc();
+                // Persistence removed for MVP
             } else {
                 Log.errorf("Failed to create GitHub repo: %s %s", response.statusCode(), response.body());
                 throw new IllegalStateException("GitHub repository creation failed");
             }
         } catch (Exception e) {
             throw new RuntimeException("Error creating GitHub repo", e);
+        }
+    }
+
+    public void fillRepoDetails(ProjectEntity project) {
+        if (project.githubOwner == null || project.githubRepo == null) return;
+        try {
+            HttpRequest.Builder builder = HttpRequest.newBuilder()
+                    .uri(URI.create(githubApiBaseUrl + "/repos/" + project.githubOwner + "/" + project.githubRepo))
+                    .header("Accept", "application/vnd.github+json")
+                    .header("User-Agent", "saleshub-deploy-platform")
+                    .GET();
+            
+            if (githubInstallationToken != null && !githubInstallationToken.equals("dev-github-token") && !githubInstallationToken.isEmpty()) {
+                builder.header("Authorization", "Bearer " + githubInstallationToken);
+            }
+
+            HttpRequest request = builder.build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                JsonNode json = objectMapper.readTree(response.body());
+                project.githubRepoId = json.get("id").asText();
+                project.defaultBranch = json.get("default_branch").asText();
+            } else {
+                 Log.warnf("Failed to fetch GitHub details for %s/%s: %s", project.githubOwner, project.githubRepo, response.statusCode());
+            }
+        } catch (Exception e) {
+            Log.error("Error fetching GitHub repo details", e);
         }
     }
 

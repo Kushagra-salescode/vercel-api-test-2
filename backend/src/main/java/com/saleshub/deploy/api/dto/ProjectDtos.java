@@ -12,6 +12,9 @@ public class ProjectDtos {
         public String repoUrl;
         public String githubOwner;
         public String githubRepo;
+        // Aliases for convenience (Swagger shows these names)
+        public String repoOwner;
+        public String repoName;
         public String defaultBranch;
         public String buildCommand;
         public String outputDirectory;

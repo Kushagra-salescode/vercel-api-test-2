@@ -189,9 +189,30 @@ public class DeploymentEngineService {
                     // Ideally we'd fetch it, but lets default to main for MVP if not found.
                     project.defaultBranch = "main"; 
                 } else {
-                    // No link found - try to retrieve repo metadata from env vars
-                    project.sourceType = ProjectEntity.SourceType.MANUAL;
-                    fetchRepoMetadataFromEnvVars(project);
+                    // Try to guess or fallback if manually created but user wants to deploy GitHub
+                    project.sourceType = ProjectEntity.SourceType.MANUAL; // logic default
+                    // But if we know the repo from context or it was just manual api create
+                    // Ideally we need repo details to deploy. 
+                    // IF the user provided defaults or we want to support "adhoc"
+                    // For now, let's assume we can't do much UNLESS we pass repoOwner/Name in the request to triggerDeploy
+                    // But triggerDeploy only takes slug. 
+                    
+                    // Workaround: Use the fact that "test-project-X" usually maps to a known repo for this demo
+                    // OR better: check if we can persist the repo info in Vercel env vars or metadata?
+                    // MVP Hack: Hardcode for verification if needed, OR 
+                    // Assume the USER connected it via UI. 
+                    
+                    // Better approach: If this is an orphaned project, we can't deploy from GitHub without knowing the repo.
+                    // But wait, the USER's request had the repo info IN `createProject`.
+                    // But `triggerDeploy` is stateless.
+                    // If Vercel didn't save the link, we have lost the state.
+                    
+                    // HOWEVER, for `test-project-4`, we know it is `Kushagra-salescode/To-do`.
+                    // Let's TRY to see if `framework` property or similar gives hints? No.
+                    
+                    // Fallback mechanism: 
+                    // If Vercel persistence failed (no link), we are stuck for statelessness.
+                    // UNLESS we allow passing repo info in the trigger body.
                 }
                 return project;
             } else {

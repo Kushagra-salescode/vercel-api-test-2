@@ -3,32 +3,22 @@ package com.saleshub.deploy.api;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.saleshub.deploy.api.dto.ProjectDtos;
-import com.saleshub.deploy.domain.DeployHookEntity;
 import com.saleshub.deploy.domain.ProjectEntity;
 import com.saleshub.deploy.service.ClockProvider;
 import com.saleshub.deploy.service.DeploymentEngineService;
 import com.saleshub.deploy.service.GitHubService;
 import com.saleshub.deploy.service.IdGenerator;
 import jakarta.inject.Inject;
-import jakarta.transaction.Transactional;
-import jakarta.ws.rs.Consumes;
-import jakarta.ws.rs.POST;
-import jakarta.ws.rs.Path;
-import jakarta.ws.rs.PathParam;
-import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.jboss.resteasy.reactive.RestForm;
-import org.jboss.resteasy.reactive.multipart.FileUpload;
 
-import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.util.Map;
 
 @Path("/projects")
@@ -63,7 +53,6 @@ public class ProjectResource {
      * Create a new project. Optionally auto-create a GitHub repo and provision webhooks.
      */
     @POST
-    @Transactional
     public Response createProject(ProjectDtos.CreateProjectRequest request) {
         ProjectEntity project = new ProjectEntity();
         project.id = idGenerator.newId();
@@ -72,8 +61,9 @@ public class ProjectResource {
         project.slug = request.slug;
         project.sourceType = ProjectEntity.SourceType.valueOf(request.sourceType);
         project.repoUrl = request.repoUrl;
-        project.githubOwner = request.githubOwner;
-        project.githubRepo = request.githubRepo;
+        // Support both githubOwner/githubRepo and repoOwner/repoName
+        project.githubOwner = request.githubOwner != null ? request.githubOwner : request.repoOwner;
+        project.githubRepo = request.githubRepo != null ? request.githubRepo : request.repoName;
         project.defaultBranch = request.defaultBranch != null ? request.defaultBranch : "main";
         project.buildCommand = request.buildCommand;
         project.outputDirectory = request.outputDirectory;
@@ -81,13 +71,20 @@ public class ProjectResource {
         project.pluginUserId = request.pluginUserId;
         project.createdAt = clock.nowUtc();
         project.updatedAt = project.createdAt;
-        // project.persist();
+        // Persistence removed for MVP
 
         String defaultDomain = project.slug + "-" + project.id.substring(0, 6) + ".yourplatform.dev";
 
         // Create Vercel project
         try {
-            Map<String, String> vercelBody = Map.of("name", project.slug);
+            Map<String, Object> vercelBody = new java.util.HashMap<>();
+            vercelBody.put("name", project.slug);
+            if (project.sourceType == ProjectEntity.SourceType.GITHUB && project.githubOwner != null && project.githubRepo != null) {
+                vercelBody.put("gitRepository", Map.of(
+                    "type", "github",
+                    "repo", project.githubOwner + "/" + project.githubRepo
+                ));
+            }
             String jsonBody = objectMapper.writeValueAsString(vercelBody);
 
             HttpRequest vercelRequest = HttpRequest.newBuilder()
@@ -102,12 +99,17 @@ public class ProjectResource {
             if (vercelResponse.statusCode() >= 200 && vercelResponse.statusCode() < 300) {
                 JsonNode vercelJson = objectMapper.readTree(vercelResponse.body());
                 project.vercelProjectId = vercelJson.get("id").asText();
+                
+                // Store repo metadata as env vars for stateless retrieval
+                if (project.githubOwner != null && project.githubRepo != null) {
+                    storeRepoMetadata(project.vercelProjectId, project.githubOwner, project.githubRepo, project.defaultBranch);
+                }
             } else {
-                // Log error but don't fail - continue without Vercel project ID
                 System.err.println("Failed to create Vercel project: " + vercelResponse.statusCode() + " " + vercelResponse.body());
+                // Fallback: try to fetch if it already exists?
+                // For MVP, proceed.
             }
         } catch (Exception e) {
-            // Log error but don't fail - continue without Vercel project ID
             System.err.println("Error creating Vercel project: " + e.getMessage());
             e.printStackTrace();
         }
@@ -117,15 +119,6 @@ public class ProjectResource {
             gitHubService.createRepositoryForProject(project, request.repoPrivate);
         }
 
-        // Provision GitHub webhook when we have a repo
-        /*
-        if (project.sourceType == ProjectEntity.SourceType.GITHUB && project.githubOwner != null && project.githubRepo != null) {
-            // baseWebhookUrl should come from configuration or public URL config; here we assume same host.
-            String baseWebhookUrl = "https://api.saleshub-deploy.internal/api";
-            gitHubService.provisionWebhook(project, baseWebhookUrl);
-        }
-        */
-
         String latestDeploymentId = null;
         if (project.sourceType == ProjectEntity.SourceType.GITHUB) {
             try {
@@ -133,7 +126,6 @@ public class ProjectResource {
                 var deployment = deploymentEngineService.triggerGitHubDeployment(project, null, project.defaultBranch);
                 latestDeploymentId = deployment.id;
             } catch (Exception e) {
-                // Log error but don't fail - continue
                 System.err.println("Failed to trigger initial deployment: " + e.getMessage());
             }
         }
@@ -144,68 +136,156 @@ public class ProjectResource {
         return Response.status(Response.Status.CREATED).entity(response).build();
     }
 
-    /**
-     * Upload a ZIP archive and create a deployment from it.
-     */
-    @Path("/{projectId}/upload-zip")
-    @POST
-    @Consumes(MediaType.MULTIPART_FORM_DATA)
-    @Transactional
-    public Response uploadZip(@PathParam("projectId") String projectId, @RestForm("file") FileUpload fileUpload) {
-        ProjectEntity project = ProjectEntity.findById(projectId);
-        if (project == null) {
-            return Response.status(Response.Status.NOT_FOUND).build();
-        }
+    @Inject
+    com.saleshub.deploy.service.DomainService domainService;
 
-        try {
-            java.nio.file.Path tempDir = Files.createTempDirectory("deploy-zip-");
-            java.nio.file.Path target = tempDir.resolve(fileUpload.fileName());
-            Files.move(fileUpload.uploadedFile(), target);
+    public static class AttachDomainRequest {
+        public String hostname;
+    }
 
-            // In a real implementation, you would upload this to object storage and pass the key.
-            String objectKey = target.toAbsolutePath().toString();
+    public static class ChangeAliasRequest {
+        public String alias;
+    }
 
-            var deployment = deploymentEngineService.triggerZipDeployment(project, objectKey);
-            return Response.accepted().entity(deployment.id).build();
-        } catch (IOException e) {
-            return Response.serverError().entity("Failed to store ZIP: " + e.getMessage()).build();
-        }
+    public static class DeploymentTriggerRequest {
+        public String githubOwner;
+        public String githubRepo;
+        public String branch;
     }
 
     /**
-     * Create a manual deploy hook for this project.
+     * Trigger a new deployment for an existing project by slug.
      */
-    @Path("/{projectId}/deploy-hooks")
+    @Path("/{slug}/deploy")
     @POST
-    @Transactional
-    public Response createDeployHook(String projectId) {
-        ProjectEntity project = ProjectEntity.findById(projectId);
+    public Response triggerDeploy(@PathParam("slug") String slug, DeploymentTriggerRequest request) {
+        // Fetch project state from Vercel to allow stateless operation
+        ProjectEntity project = deploymentEngineService.fetchProjectSettings(slug);
+        
         if (project == null) {
-            return Response.status(Response.Status.NOT_FOUND).build();
+            return Response.status(Response.Status.NOT_FOUND).entity("Project not found: " + slug).build();
         }
-        DeployHookEntity hook = new DeployHookEntity();
-        hook.id = idGenerator.newId();
-        hook.projectId = project.id;
-        hook.hookId = idGenerator.newId();
-        hook.createdAt = clock.nowUtc();
-        hook.persist();
-        return Response.status(Response.Status.CREATED).entity(hook.hookId).build();
-    }
-    @Path("/{projectId}/deploy")
-    @POST
-    // @Transactional
-    public Response triggerDeploy(@PathParam("projectId") String projectId) {
-        ProjectEntity project = ProjectEntity.findById(projectId);
-        if (project == null) {
-            // For MVP/Demo without DB, we might not find it if persistence is off.
-            return Response.status(Response.Status.NOT_FOUND).entity("Project not found (DB disabled)").build();
+
+        // Apply overrides/fallbacks if Vercel Link is missing
+        if (request != null) {
+            if (request.githubOwner != null) project.githubOwner = request.githubOwner;
+            if (request.githubRepo != null) project.githubRepo = request.githubRepo;
+            if (request.branch != null) project.defaultBranch = request.branch;
+        }
+
+        // Validate we have the minimum required information for deployment
+        if (project.githubOwner == null || project.githubRepo == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                .entity("Project is not linked to a GitHub repository. Please provide 'githubOwner', 'githubRepo', and 'branch' in the request body.")
+                .build();
+        }
+
+        // Ensure we have a branch (default to main if not specified)
+        if (project.defaultBranch == null || project.defaultBranch.isEmpty()) {
+            project.defaultBranch = "main";
+        }
+
+        // Set source type and fetch repo details
+        project.sourceType = ProjectEntity.SourceType.GITHUB;
+        gitHubService.fillRepoDetails(project);
+
+        // Verify we successfully fetched the repoId
+        if (project.githubRepoId == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                .entity("Failed to fetch repository details from GitHub for " + project.githubOwner + "/" + project.githubRepo + ". Please verify the repository exists and is accessible.")
+                .build();
         }
 
         try {
-            deploymentEngineService.triggerGitHubDeployment(project, null, project.defaultBranch);
-            return Response.ok("Deployment triggered").build();
+            var deployment = deploymentEngineService.triggerGitHubDeployment(project, null, project.defaultBranch);
+            
+            if (deployment.status == com.saleshub.deploy.domain.DeploymentEntity.Status.FAILED) { // Check status
+                 return Response.serverError().entity("Deployment failed: " + deployment.logs).build();
+            }
+
+            return Response.ok(deployment.vercelDeploymentId).build(); // Return deployment ID as requested
         } catch (Exception e) {
             return Response.serverError().entity(e.getMessage()).build();
+        }
+    }
+
+    @POST
+    @Path("/{slug}/domains")
+    public Response attachCustomDomain(@PathParam("slug") String slug, AttachDomainRequest request) {
+        ProjectEntity project = deploymentEngineService.fetchProjectSettings(slug);
+        if (project == null) {
+            return Response.status(Response.Status.NOT_FOUND).entity("Project not found").build();
+        }
+
+        com.saleshub.deploy.domain.DomainEntity domain = domainService.attachCustomDomain(project, request.hostname);
+
+        // MVP: Return simplified instructions
+        return Response.status(Response.Status.CREATED).entity(
+            Map.of(
+                "hostname", domain.hostname,
+                "status", domain.verified ? "VERIFIED" : "PENDING_CNAME",
+                "target", "cname.vercel-dns.com",
+                "vercelObjectId", domain.vercelDomainId != null ? domain.vercelDomainId : "unknown"
+            )
+        ).build();
+    }
+
+    @POST
+    @Path("/{slug}/alias")
+    public Response changeAlias(@PathParam("slug") String slug, ChangeAliasRequest request) {
+        ProjectEntity project = deploymentEngineService.fetchProjectSettings(slug);
+        if (project == null) {
+            return Response.status(Response.Status.NOT_FOUND).entity("Project not found").build();
+        }
+
+        com.saleshub.deploy.domain.DomainEntity domain = domainService.changeAlias(project, request.alias);
+
+        return Response.ok(Map.of(
+            "alias", domain.hostname,
+            "status", "ATTACHED",
+            "vercelObjectId", domain.vercelDomainId != null ? domain.vercelDomainId : "unknown"
+        )).build();
+    }
+
+    @DELETE
+    @Path("/{slug}/domains/{hostname}")
+    public Response detachDomain(@PathParam("slug") String slug,
+                                 @PathParam("hostname") String hostname) {
+        ProjectEntity project = deploymentEngineService.fetchProjectSettings(slug);
+        if (project == null) {
+            return Response.status(Response.Status.NOT_FOUND).entity("Project not found").build();
+        }
+
+        domainService.detachDomain(project.vercelProjectId, hostname);
+        return Response.noContent().build();
+    }
+
+    /**
+     * Store GitHub repo metadata as Vercel environment variables for stateless retrieval.
+     */
+    private void storeRepoMetadata(String vercelProjectId, String githubOwner, String githubRepo, String defaultBranch) {
+        try {
+            Map<String, Object> envVars = Map.of(
+                "GITHUB_REPO_OWNER", Map.of("type", "plain", "value", githubOwner, "target", new String[]{"production", "preview", "development"}),
+                "GITHUB_REPO_NAME", Map.of("type", "plain", "value", githubRepo, "target", new String[]{"production", "preview", "development"}),
+                "GITHUB_DEFAULT_BRANCH", Map.of("type", "plain", "value", defaultBranch, "target", new String[]{"production", "preview", "development"})
+            );
+
+            String jsonBody = objectMapper.writeValueAsString(envVars);
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(vercelBaseUrl + "/v10/projects/" + vercelProjectId + "/env"))
+                    .header("Authorization", "Bearer " + vercelApiToken)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                System.err.println("Failed to store repo metadata: " + response.statusCode() + " " + response.body());
+            }
+        } catch (Exception e) {
+            System.err.println("Error storing repo metadata: " + e.getMessage());
         }
     }
 }
